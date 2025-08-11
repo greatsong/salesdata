@@ -7,9 +7,9 @@ import altair as alt
 
 st.set_page_config(page_title="서울시 상권 분기 매출 대시보드", layout="wide")
 
-# ====== 설정: 파일의 '정확한' 열 이름을 그대로 사용 ======
+# ====== 고정: 파일의 '정확한' 열 이름 사용 ======
 QUARTER_COL = "기준_년분기_코드"
-AMT_COL     = "당월_매출_금액"   # 파일에 이렇게 표기되어 있어도 '분기 합계'로 취급
+AMT_COL     = "당월_매출_금액"   # 파일 상 표기가 '당월'이어도 본 앱에서는 '분기 합계'로 취급
 CNT_COL     = "당월_매출_건수"
 
 # ====== 유틸 ======
@@ -23,18 +23,29 @@ def load_csv(file_like_or_path):
     return None
 
 def to_num(s):
-    return pd.to_numeric(pd.Series(s, dtype="object").astype(str).str.replace(",", "", regex=False),
-                         errors="coerce")
+    """천단위 콤마 등 문자열도 안전하게 숫자로 변환"""
+    return pd.to_numeric(
+        pd.Series(s, dtype="object").astype(str).str.replace(",", "", regex=False),
+        errors="coerce"
+    )
 
 def parse_yq(s: str):
+    """'2024Q1', '2024 1', '20241' 등에서 (연,분기) 튜플 반환"""
     s = str(s)
     m = re.search(r"(20\d{2}).*?([1-4])", s)
     if m: return int(m.group(1)), int(m.group(2))
     if s.isdigit() and len(s) in (5,6): return int(s[:4]), int(s[-1])
     return (9999, 9)
 
+def prev_yq_str(y, q):
+    py, pq = (y-1, 4) if q == 1 else (y, q-1)
+    return f"{py}Q{pq}"
+
+def yoy_yq_str(y, q):
+    return f"{y-1}Q{q}"
+
 def pct(a, b):
-    return (a/b-1)*100 if (b and b != 0) else np.nan
+    return (a/b - 1) * 100 if (b and b != 0) else np.nan
 
 # ====== 데이터 소스 선택 ======
 st.title("📊 서울시 상권 **분기** 매출 대시보드 (원본 열이름 그대로)")
@@ -47,7 +58,7 @@ if up is not None:
     df = load_csv(up)
     src_desc = "업로드 파일"
 else:
-    # 현재 폴더의 CSV들을 나열해서 선택 (한글 파일명 문제 회피)
+    # 현재 폴더의 CSV 목록에서 선택 (한글 파일명 경로 이슈 회피)
     csvs = [f for f in os.listdir(".") if f.lower().endswith(".csv")]
     if not csvs:
         st.error("현재 폴더에 CSV가 없습니다. 파일을 업로드하세요.")
@@ -57,13 +68,14 @@ else:
         df = load_csv(sel)
         src_desc = f"로컬 파일: {sel}"
 
-if df is None:
+if df is None or df.empty:
     st.error("CSV를 읽지 못했습니다. 인코딩/파일을 확인하세요.")
     st.stop()
 
+# 컬럼 전처리: 앞뒤 공백/숨은문자 제거
 df.columns = df.columns.map(lambda c: str(c).strip().replace("\u200b",""))
 
-# 필수 컬럼 체크: 정확히 존재해야 함
+# 필수 컬럼 체크 (정확히 존재해야 함)
 missing = [c for c in [QUARTER_COL, AMT_COL, CNT_COL] if c not in df.columns]
 if missing:
     st.error(f"필수 컬럼이 없습니다: {missing}\n\n현재 컬럼 목록: {list(df.columns)}")
@@ -79,7 +91,7 @@ with st.sidebar:
     default_last = uniq_q[-5:] if len(uniq_q) >= 5 else uniq_q
     picked = st.multiselect("분기 선택", options=uniq_q, default=default_last)
 
-    # 보조 필터
+    # 보조 필터(존재하는 경우만)
     extra_filters = []
     for col in ["상권_코드_명", "서비스_업종_코드_명", "자치구", "상권_코드"]:
         if col in df.columns:
@@ -116,35 +128,33 @@ c1.metric("총 매출 금액", f"{sum_amt:,.0f} 원")
 c2.metric("총 매출 건수", f"{sum_cnt:,.0f} 건")
 c3.metric("평균 객단가", f"{avg_price:,.0f} 원" if pd.notna(avg_price) else "계산 불가")
 
-# 최근분기 QoQ/YoY
+# 최근분기 / QoQ / YoY
 uniq_q_sorted = sorted(work[QUARTER_COL].astype(str).unique(), key=parse_yq)
 last_q = uniq_q_sorted[-1]
 last_y, last_qu = parse_yq(last_q)
-prev_q = f"{last_y-1 if last_qu==1 else last_y}Q{4 if last_qu==1 else last_qu-1}"
-yoy_q  = f"{last_y-1}Q{last_qu}"
+prev_q = prev_yq_str(last_y, last_qu)
+yoy_q  = yoy_yq_str(last_y, last_qu)
 
 def sum_for(q, col):
     s = work[work[QUARTER_COL].astype(str) == q]
     return to_num(s[col]).sum()
 
 cur = sum_for(last_q, AMT_COL)
-prv = sum_for(prev_q, AMT_COL)
-yy  = sum_for(yoy_q, AMT_COL)
+prv = sum_for(prev_q, AMT_COL) if prev_q in uniq_q_sorted else np.nan
+yy  = sum_for(yoy_q, AMT_COL)  if yoy_q  in uniq_q_sorted else np.nan
 
 c4, c5, c6 = st.columns(3)
 c4.metric(f"{last_q} 매출", f"{cur:,.0f} 원")
-c5.metric("QoQ", f"{pct(cur, prv):.1f} %" if prv else "N/A")
-c6.metric("YoY", f"{pct(cur, yy):.1f} %" if yy else "N/A")
+c5.metric("QoQ", f"{pct(cur, prv):.1f} %" if pd.notna(prv) else "N/A")
+c6.metric("YoY", f"{pct(cur, yy):.1f} %" if pd.notna(yy) else "N/A")
 
-# ====== 분기 추이 ======
+# ====== 분기별 매출 추이 (✔ 그룹 합계 후 reset_index) ======
 st.subheader("📈 분기별 매출 추이")
 trend = (
     work.groupby(QUARTER_COL)[AMT_COL]
-    .apply(to_num)
-    .sum()
-    .reset_index()
-    .rename(columns={AMT_COL: "매출 금액"})
-    .sort_values(by=QUARTER_COL, key=lambda s: s.astype(str).map(parse_yq))
+        .agg(lambda s: to_num(s).sum())             # 그룹별 합
+        .reset_index(name="매출 금액")               # 이름 지정하여 스칼라 오류 방지
+        .sort_values(by=QUARTER_COL, key=lambda s: s.astype(str).map(parse_yq))
 )
 st.altair_chart(
     alt.Chart(trend).mark_line(point=True).encode(
@@ -155,13 +165,16 @@ st.altair_chart(
     use_container_width=True
 )
 
-# ====== 랭킹 (업종/상권이 있으면 각각) ======
+# ====== 랭킹 (업종/상권이 있으면 각각) — ✔ 그룹 합계 방식 통일 ======
 st.subheader(f"🏆 {metric_name} 기준 Top {TOPN}")
+
 if "서비스_업종_코드_명" in work.columns:
     up = (
         work.groupby("서비스_업종_코드_명")[METRIC_COL]
-        .apply(to_num).sum().reset_index().rename(columns={METRIC_COL: "값"})
-        .sort_values("값", ascending=False).head(TOPN)
+            .agg(lambda s: to_num(s).sum())
+            .reset_index(name="값")
+            .sort_values("값", ascending=False)
+            .head(TOPN)
     )
     st.caption("업종 Top-N")
     st.dataframe(up, use_container_width=True)
@@ -177,8 +190,10 @@ if "서비스_업종_코드_명" in work.columns:
 if "상권_코드_명" in work.columns:
     ar = (
         work.groupby("상권_코드_명")[METRIC_COL]
-        .apply(to_num).sum().reset_index().rename(columns={METRIC_COL: "값"})
-        .sort_values("값", ascending=False).head(TOPN)
+            .agg(lambda s: to_num(s).sum())
+            .reset_index(name="값")
+            .sort_values("값", ascending=False)
+            .head(TOPN)
     )
     st.caption("상권 Top-N")
     st.dataframe(ar, use_container_width=True)
