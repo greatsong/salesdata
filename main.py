@@ -52,7 +52,7 @@ if uploaded:
     df = load_csv(uploaded)
 else:
     st.info("샘플 데이터를 로드합니다. (같은 경로의 CSV)")
-    sample_path = os.path.join(os.path.dirname(__file__), "서울시 상권분석서비스(추정매출-상권)_sample.csv")
+    sample_path = os.path.join(os.path.dirname(__file__), "서울시 상권분석서비스(추정매출-상권)_sample.csv")
     if os.path.exists(sample_path):
         df = load_csv(sample_path)
     else:
